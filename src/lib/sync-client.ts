@@ -19,15 +19,6 @@ export async function fetchSyncStatus(): Promise<SyncStatusInfo> {
   return (await response.json()) as SyncStatusInfo;
 }
 
-export async function createSyncSession(): Promise<RemoteSyncState> {
-  const response = await fetch("/api/sync", { method: "POST" });
-  if (!response.ok) {
-    throw new Error("create_failed");
-  }
-
-  return (await response.json()) as RemoteSyncState;
-}
-
 export async function fetchSyncSession(code: string): Promise<RemoteSyncState> {
   const response = await fetch(`/api/sync/${code}`, { cache: "no-store" });
   if (!response.ok) {
@@ -58,27 +49,7 @@ export async function saveSyncSession(
   return (await response.json()) as RemoteSyncState;
 }
 
-export function getCodeFromUrl(): string | null {
-  if (typeof window === "undefined") return null;
-
-  const code = new URLSearchParams(window.location.search).get("code");
-  return code?.trim().toUpperCase() ?? null;
-}
-
-export function buildShareUrl(code: string): string {
-  const url = new URL(window.location.href);
-  url.searchParams.set("code", code);
-  return url.toString();
-}
-
-export async function copyText(value: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
+export { getSharedSyncCode } from "@/lib/sync-code";
 
 export function loadLocalUpdatedAt(): number {
   if (typeof window === "undefined") return 0;

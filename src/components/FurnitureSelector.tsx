@@ -15,14 +15,10 @@ import {
   type ItemSelection,
   type SelectionsState,
 } from "@/lib/selections";
-import { isValidSyncCode, normalizeSyncCode } from "@/lib/sync-code";
 import {
-  buildShareUrl,
-  copyText,
-  createSyncSession,
   fetchSyncSession,
   fetchSyncStatus,
-  getCodeFromUrl,
+  getSharedSyncCode,
   loadLocalSelections,
   loadLocalSyncCode,
   loadLocalUpdatedAt,
@@ -55,14 +51,12 @@ export default function FurnitureSelector() {
   const [syncCode, setSyncCode] = useState("");
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("loading");
   const [syncMessage, setSyncMessage] = useState("טוען נתונים...");
-  const [codeInput, setCodeInput] = useState("");
   const [search, setSearch] = useState("");
   const [activeSection, setActiveSection] = useState(
     FURNITURE_SECTIONS[0]?.id ?? "",
   );
   const [showSummary, setShowSummary] = useState(false);
   const [hydrated, setHydrated] = useState(false);
-  const [copyFeedback, setCopyFeedback] = useState("");
   const [cloudSyncReady, setCloudSyncReady] = useState(true);
   const [cloudSyncRequired, setCloudSyncRequired] = useState(false);
 
@@ -123,7 +117,7 @@ export default function FurnitureSelector() {
       updatedAtRef.current = result.updatedAt;
       saveLocalState(selectionsRef.current, result.updatedAt, code);
       setSyncStatus("synced");
-      setSyncMessage("מסונכרן בין מכשירים");
+      setSyncMessage("מסונכרן אוטומטית");
     } catch {
       setSyncStatus("error");
       setSyncMessage("שגיאה בשמירה בענן");
@@ -174,78 +168,76 @@ export default function FurnitureSelector() {
     let cancelled = false;
 
     async function initialize() {
+      const code = getSharedSyncCode();
+      setSyncCode(code);
+
       try {
-        const urlCode = getCodeFromUrl();
-        const storedCode = loadLocalSyncCode();
-        let code = normalizeSyncCode(urlCode ?? storedCode ?? "");
-
-        if (!isValidSyncCode(code)) {
-          const session = await createSyncSession();
-          code = session.code;
-        }
-
         const localSelections = loadLocalSelections();
         const localUpdatedAt = loadLocalUpdatedAt();
+        const storedCode = loadLocalSyncCode();
 
-        if (urlCode && isValidSyncCode(normalizeSyncCode(urlCode))) {
-          await pullFromServer(code, true);
-        } else if (localSelections) {
-          let remote;
+        let remote;
 
-          try {
+        try {
+          remote = await fetchSyncSession(code);
+        } catch (error) {
+          if (error instanceof Error && error.message === "not_found") {
+            const merged = localSelections
+              ? mergeSelections(createEmptySelections(), localSelections)
+              : createEmptySelections();
+            const nextUpdatedAt = localUpdatedAt || Date.now();
+            await saveSyncSession(code, {
+              selections: merged,
+              updatedAt: nextUpdatedAt,
+            });
             remote = await fetchSyncSession(code);
-          } catch (error) {
-            if (error instanceof Error && error.message === "not_found") {
-              const merged = mergeSelections(
-                createEmptySelections(),
-                localSelections,
-              );
-              const nextUpdatedAt = localUpdatedAt || Date.now();
-              await saveSyncSession(code, {
-                selections: merged,
-                updatedAt: nextUpdatedAt,
-              });
-              remote = await fetchSyncSession(code);
-            } else {
-              throw error;
-            }
-          }
-
-          if (remote.updatedAt >= localUpdatedAt) {
-            applyRemoteState(
-              remote.selections,
-              remote.updatedAt,
-              code,
-              setSelections,
-              setUpdatedAt,
-              setSyncCode,
-            );
           } else {
-            const merged = mergeSelections(
-              createEmptySelections(),
-              localSelections,
-            );
-            setSelections(merged);
-            setUpdatedAt(localUpdatedAt);
-            setSyncCode(code);
-            saveLocalState(merged, localUpdatedAt, code);
-            await pushToServer(code, localUpdatedAt);
+            throw error;
           }
+        }
+
+        if (
+          storedCode &&
+          storedCode !== code &&
+          localSelections &&
+          localUpdatedAt > remote.updatedAt
+        ) {
+          const merged = mergeSelections(createEmptySelections(), localSelections);
+          await saveSyncSession(code, {
+            selections: merged,
+            updatedAt: localUpdatedAt,
+          });
+          remote = await fetchSyncSession(code);
+        }
+
+        if (!localSelections || remote.updatedAt >= localUpdatedAt) {
+          applyRemoteState(
+            remote.selections,
+            remote.updatedAt,
+            code,
+            setSelections,
+            setUpdatedAt,
+            setSyncCode,
+          );
         } else {
-          await pullFromServer(code, true);
+          const merged = mergeSelections(createEmptySelections(), localSelections);
+          setSelections(merged);
+          setUpdatedAt(localUpdatedAt);
+          setSyncCode(code);
+          saveLocalState(merged, localUpdatedAt, code);
+          await pushToServer(code, localUpdatedAt);
         }
 
         if (!cancelled) {
-          setCodeInput(code);
           setHydrated(true);
           setSyncStatus("synced");
-          setSyncMessage("מסונכרן בין מכשירים");
+          setSyncMessage("מסונכרן אוטומטית");
         }
       } catch {
         if (!cancelled) {
           setHydrated(true);
           setSyncStatus("error");
-          setSyncMessage("לא ניתן לטעון סנכרון");
+          setSyncMessage("לא ניתן לטעון נתונים");
         }
       }
     }
@@ -255,7 +247,7 @@ export default function FurnitureSelector() {
     return () => {
       cancelled = true;
     };
-  }, [pullFromServer, pushToServer]);
+  }, [pushToServer]);
 
   useEffect(() => {
     if (!hydrated || !syncCode) return;
@@ -285,18 +277,23 @@ export default function FurnitureSelector() {
 
     function refreshFromServer() {
       if (document.visibilityState !== "visible") return;
-      void pullFromServer(syncCodeRef.current, false).then(() => {
-        setSyncStatus("synced");
-        setSyncMessage("מסונכרן בין מכשירים");
-      }).catch(() => {
-        setSyncStatus("error");
-        setSyncMessage("שגיאה בטעינה מהענן");
-      });
+      void pullFromServer(syncCodeRef.current, false)
+        .then(() => {
+          setSyncStatus("synced");
+          setSyncMessage("מסונכרן אוטומטית");
+        })
+        .catch(() => {
+          setSyncStatus("error");
+          setSyncMessage("שגיאה בטעינה מהענן");
+        });
     }
 
     document.addEventListener("visibilitychange", refreshFromServer);
+    const intervalId = window.setInterval(refreshFromServer, 10000);
+
     return () => {
       document.removeEventListener("visibilitychange", refreshFromServer);
+      window.clearInterval(intervalId);
     };
   }, [hydrated, syncCode, pullFromServer]);
 
@@ -374,72 +371,6 @@ export default function FurnitureSelector() {
     setSelections(createEmptySelections());
   }
 
-  async function handleLoadCode() {
-    const code = normalizeSyncCode(codeInput);
-    if (!isValidSyncCode(code)) {
-      setSyncStatus("error");
-      setSyncMessage("קוד הסנכרון חייב להיות 6 תווים");
-      return;
-    }
-
-    setSyncStatus("syncing");
-    setSyncMessage("טוען קוד...");
-
-    try {
-      await pullFromServer(code, true);
-      setSyncStatus("synced");
-      setSyncMessage("נטען בהצלחה");
-    } catch (error) {
-      setSyncStatus("error");
-      setSyncMessage(
-        error instanceof Error && error.message === "not_found"
-          ? "קוד הסנכרון לא נמצא"
-          : "שגיאה בטעינת הקוד",
-      );
-    }
-  }
-
-  async function handleCreateNewCode() {
-    if (!confirm("ליצור קוד סנכרון חדש? הקוד הנוכחי יישאר, אבל המכשיר יעבור לרשימה חדשה.")) {
-      return;
-    }
-
-    setSyncStatus("syncing");
-    setSyncMessage("יוצר קוד חדש...");
-
-    try {
-      const session = await createSyncSession();
-      applyRemoteState(
-        session.selections,
-        session.updatedAt,
-        session.code,
-        setSelections,
-        setUpdatedAt,
-        setSyncCode,
-      );
-      setCodeInput(session.code);
-      setSyncStatus("synced");
-      setSyncMessage("נוצר קוד סנכרון חדש");
-    } catch {
-      setSyncStatus("error");
-      setSyncMessage("לא ניתן ליצור קוד חדש");
-    }
-  }
-
-  async function handleCopyCode() {
-    if (!syncCode) return;
-    const copied = await copyText(syncCode);
-    setCopyFeedback(copied ? "הקוד הועתק" : "לא ניתן להעתיק");
-    window.setTimeout(() => setCopyFeedback(""), 2000);
-  }
-
-  async function handleCopyLink() {
-    if (!syncCode) return;
-    const copied = await copyText(buildShareUrl(syncCode));
-    setCopyFeedback(copied ? "הקישור הועתק" : "לא ניתן להעתיק");
-    window.setTimeout(() => setCopyFeedback(""), 2000);
-  }
-
   const visibleSection =
     filteredSections.find((section) => section.id === activeSection) ??
     filteredSections[0];
@@ -464,7 +395,8 @@ export default function FurnitureSelector() {
                 רשימת רהיטים וציוד
               </h1>
               <p className="mt-1 text-sm text-stone-600">
-                סמנו פריטים ובחרו שם: {PERSON_NAMES.join(" · ")}
+                סמנו פריטים ובחרו שם: {PERSON_NAMES.join(" · ")} · הבחירות
+                משותפות לכולם באופן אוטומטי
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -491,85 +423,15 @@ export default function FurnitureSelector() {
             </div>
           </div>
 
-          <section className="rounded-2xl border border-stone-200 bg-stone-50 p-4">
-            {!cloudSyncReady && cloudSyncRequired && (
-              <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-                <p className="font-semibold">סנכרון ענן עדיין לא מוגדר ב-Vercel</p>
-                <p className="mt-1">
-                  הבחירות נשמרות רק במכשיר הנוכחי. כדי שיעבדו בין מכשירים, חברו
-                  Upstash Redis בלוח הבקרה של Vercel ופרסו מחדש.
-                </p>
-              </div>
-            )}
-
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-              <div className="space-y-2">
-                <h2 className="text-sm font-semibold text-stone-800">
-                  סנכרון בין מכשירים
-                </h2>
-                <p className="text-sm text-stone-600">
-                  השתמשו באותו קוד סנכרון בכל המכשירים, או שלחו קישור.
-                </p>
-                {syncCode && (
-                  <p className="font-mono text-lg font-bold tracking-[0.2em] text-stone-900">
-                    {syncCode}
-                  </p>
-                )}
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={handleCopyCode}
-                  disabled={!syncCode}
-                  className="rounded-xl border border-stone-300 bg-white px-4 py-2 text-sm font-medium transition hover:bg-stone-100 disabled:opacity-50"
-                >
-                  העתק קוד
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCopyLink}
-                  disabled={!syncCode}
-                  className="rounded-xl border border-stone-300 bg-white px-4 py-2 text-sm font-medium transition hover:bg-stone-100 disabled:opacity-50"
-                >
-                  העתק קישור
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCreateNewCode}
-                  className="rounded-xl border border-stone-300 bg-white px-4 py-2 text-sm font-medium transition hover:bg-stone-100"
-                >
-                  קוד חדש
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-              <input
-                type="text"
-                value={codeInput}
-                onChange={(event) =>
-                  setCodeInput(event.target.value.toUpperCase())
-                }
-                placeholder="הזינו קוד סנכרון (6 תווים)"
-                maxLength={6}
-                className="w-full rounded-xl border border-stone-300 bg-white px-4 py-2.5 font-mono text-base tracking-widest outline-none transition focus:border-amber-400 focus:ring-2 focus:ring-amber-200 sm:max-w-xs"
-              />
-              <button
-                type="button"
-                onClick={handleLoadCode}
-                className="rounded-xl bg-stone-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-stone-700"
-              >
-                טען קוד
-              </button>
-            </div>
-
-            {copyFeedback && (
-              <p className="mt-2 text-sm font-medium text-emerald-700">
-                {copyFeedback}
+          {!cloudSyncReady && cloudSyncRequired && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+              <p className="font-semibold">סנכרון ענן עדיין לא מוגדר ב-Vercel</p>
+              <p className="mt-1">
+                הבחירות נשמרות רק במכשיר הנוכחי. כדי שיעבדו בין מכשירים, חברו
+                Upstash Redis בלוח הבקרה של Vercel ופרסו מחדש.
               </p>
-            )}
-          </section>
+            </div>
+          )}
 
           <label className="relative block">
             <span className="sr-only">חיפוש פריט</span>
@@ -724,7 +586,7 @@ export default function FurnitureSelector() {
           <div className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
             <h2 className="text-lg font-semibold">סיכום בחירות</h2>
             <p className="mt-1 text-sm text-stone-500">
-              {selectedCount} פריטים נבחרו · נשמר מקומית ובענן
+              {selectedCount} פריטים נבחרו · משותף לכל המשפחה
             </p>
           </div>
 

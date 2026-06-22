@@ -1,5 +1,17 @@
 const CHARSET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const CODE_LENGTH = 6;
+const DEFAULT_SHARED_SYNC_CODE = "REHITM";
+
+export function getSharedSyncCode(): string {
+  const fromEnv = process.env.NEXT_PUBLIC_SHARED_SYNC_CODE?.trim();
+  const candidate = normalizeSyncCode(fromEnv ?? DEFAULT_SHARED_SYNC_CODE);
+
+  if (!isValidSyncCode(candidate)) {
+    return DEFAULT_SHARED_SYNC_CODE;
+  }
+
+  return candidate;
+}
 
 export function generateSyncCode(): string {
   let code = "";
