@@ -5,13 +5,15 @@ import type { SyncPayload } from "@/lib/selections";
 import { createEmptySelections } from "@/lib/selections";
 import { isValidSyncCode, normalizeSyncCode, generateSyncCode } from "@/lib/sync-code";
 
-const redis =
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
-    ? new Redis({
-        url: process.env.UPSTASH_REDIS_REST_URL,
-        token: process.env.UPSTASH_REDIS_REST_TOKEN,
-      })
-    : null;
+function createRedisClient(): Redis | null {
+  try {
+    return Redis.fromEnv();
+  } catch {
+    return null;
+  }
+}
+
+const redis = createRedisClient();
 
 export function isCloudSyncConfigured(): boolean {
   return Boolean(redis);
