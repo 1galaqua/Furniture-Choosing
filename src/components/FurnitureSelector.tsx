@@ -28,6 +28,10 @@ import {
 
 type SyncStatus = "loading" | "syncing" | "synced" | "error";
 
+function selectionsEqual(a: SelectionsState, b: SelectionsState): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 function applyRemoteState(
   remoteSelections: SelectionsState,
   remoteUpdatedAt: number,
@@ -35,12 +39,23 @@ function applyRemoteState(
   setSelections: (value: SelectionsState) => void,
   setUpdatedAt: (value: number) => void,
   setSyncCode: (value: string) => void,
-) {
+  currentSelections: SelectionsState,
+  currentUpdatedAt: number,
+): boolean {
   const normalized = normalizeSelections(remoteSelections);
+
+  if (
+    currentUpdatedAt === remoteUpdatedAt &&
+    selectionsEqual(currentSelections, normalized)
+  ) {
+    return false;
+  }
+
   setSelections(normalized);
   setUpdatedAt(remoteUpdatedAt);
   setSyncCode(syncCode);
   saveLocalState(normalized, remoteUpdatedAt, syncCode);
+  return true;
 }
 
 export default function FurnitureSelector() {
@@ -50,7 +65,6 @@ export default function FurnitureSelector() {
   const [updatedAt, setUpdatedAt] = useState(0);
   const [syncCode, setSyncCode] = useState("");
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("loading");
-  const [syncMessage, setSyncMessage] = useState("טוען נתונים...");
   const [search, setSearch] = useState("");
   const [activeSection, setActiveSection] = useState(
     FURNITURE_SECTIONS[0]?.id ?? "",
@@ -89,9 +103,6 @@ export default function FurnitureSelector() {
   }, []);
 
   const pushToServer = useCallback(async (code: string, nextUpdatedAt: number) => {
-    setSyncStatus("syncing");
-    setSyncMessage("שומר בענן...");
-
     try {
       const result = await saveSyncSession(code, {
         selections: selectionsRef.current,
@@ -107,9 +118,10 @@ export default function FurnitureSelector() {
           setSelections,
           setUpdatedAt,
           setSyncCode,
+          selectionsRef.current,
+          updatedAtRef.current,
         );
         setSyncStatus("synced");
-        setSyncMessage("עודכן מהענן");
         return;
       }
 
@@ -117,24 +129,17 @@ export default function FurnitureSelector() {
       updatedAtRef.current = result.updatedAt;
       saveLocalState(selectionsRef.current, result.updatedAt, code);
       setSyncStatus("synced");
-      setSyncMessage("מסונכרן אוטומטית");
     } catch {
       setSyncStatus("error");
-      setSyncMessage("שגיאה בשמירה בענן");
     }
   }, []);
 
   const pullFromServer = useCallback(async (code: string, preferRemote = false) => {
     try {
       const remote = await fetchSyncSession(code);
-      const localSelections = loadLocalSelections();
-      const localUpdatedAt = loadLocalUpdatedAt();
+      const currentUpdatedAt = updatedAtRef.current;
 
-      if (
-        preferRemote ||
-        remote.updatedAt >= localUpdatedAt ||
-        !localSelections
-      ) {
+      if (preferRemote || remote.updatedAt >= currentUpdatedAt) {
         applyRemoteState(
           remote.selections,
           remote.updatedAt,
@@ -142,20 +147,14 @@ export default function FurnitureSelector() {
           setSelections,
           setUpdatedAt,
           setSyncCode,
+          selectionsRef.current,
+          currentUpdatedAt,
         );
         return remote.updatedAt;
       }
 
-      const merged = mergeSelections(
-        createEmptySelections(),
-        localSelections,
-      );
-      setSelections(merged);
-      setUpdatedAt(localUpdatedAt);
-      setSyncCode(code);
-      saveLocalState(merged, localUpdatedAt, code);
-      await pushToServer(code, localUpdatedAt);
-      return localUpdatedAt;
+      await pushToServer(code, currentUpdatedAt);
+      return currentUpdatedAt;
     } catch (error) {
       if (error instanceof Error && error.message === "not_found") {
         throw error;
@@ -218,6 +217,8 @@ export default function FurnitureSelector() {
             setSelections,
             setUpdatedAt,
             setSyncCode,
+            localSelections ?? createEmptySelections(),
+            localUpdatedAt,
           );
         } else {
           const merged = mergeSelections(createEmptySelections(), localSelections);
@@ -231,13 +232,11 @@ export default function FurnitureSelector() {
         if (!cancelled) {
           setHydrated(true);
           setSyncStatus("synced");
-          setSyncMessage("מסונכרן אוטומטית");
         }
       } catch {
         if (!cancelled) {
           setHydrated(true);
           setSyncStatus("error");
-          setSyncMessage("לא ניתן לטעון נתונים");
         }
       }
     }
@@ -277,15 +276,9 @@ export default function FurnitureSelector() {
 
     function refreshFromServer() {
       if (document.visibilityState !== "visible") return;
-      void pullFromServer(syncCodeRef.current, false)
-        .then(() => {
-          setSyncStatus("synced");
-          setSyncMessage("מסונכרן אוטומטית");
-        })
-        .catch(() => {
-          setSyncStatus("error");
-          setSyncMessage("שגיאה בטעינה מהענן");
-        });
+      void pullFromServer(syncCodeRef.current, false).catch(() => {
+        setSyncStatus("error");
+      });
     }
 
     document.addEventListener("visibilitychange", refreshFromServer);
@@ -377,12 +370,28 @@ export default function FurnitureSelector() {
 
   const syncStatusClass =
     syncStatus === "synced"
-      ? "bg-emerald-100 text-emerald-800"
+      ? "bg-emerald-100"
       : syncStatus === "syncing"
-        ? "bg-amber-100 text-amber-800"
+        ? "bg-amber-100"
         : syncStatus === "loading"
-          ? "bg-stone-100 text-stone-700"
-          : "bg-red-100 text-red-800";
+          ? "bg-stone-100"
+          : "bg-red-100";
+
+  const syncDotClass =
+    syncStatus === "synced"
+      ? "bg-emerald-500"
+      : syncStatus === "syncing"
+        ? "bg-amber-500 animate-pulse"
+        : syncStatus === "loading"
+          ? "bg-stone-400 animate-pulse"
+          : "bg-red-500";
+
+  const syncLabel =
+    syncStatus === "error"
+      ? "שגיאת סנכרון"
+      : syncStatus === "loading"
+        ? "טוען נתונים"
+        : "מסונכרן";
 
   return (
     <div className="min-h-full bg-stone-100 text-stone-900">
@@ -403,8 +412,12 @@ export default function FurnitureSelector() {
               <span className="rounded-full bg-amber-100 px-3 py-1 text-sm font-medium text-amber-900">
                 {selectedCount} נבחרו
               </span>
-              <span className={`rounded-full px-3 py-1 text-sm font-medium ${syncStatusClass}`}>
-                {syncMessage}
+              <span
+                className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${syncStatusClass}`}
+                title={syncLabel}
+                aria-label={syncLabel}
+              >
+                <span className={`h-2.5 w-2.5 rounded-full ${syncDotClass}`} />
               </span>
               <button
                 type="button"
